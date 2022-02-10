@@ -4,14 +4,13 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"golang.org/x/sys/unix"
-	"unsafe"
+	"os"
 )
 
 // https://www.seagate.com/files/staticfiles/support/docs/manual/Interface%20manuals/100293068j.pdf
 
 type ScsiDevice struct {
-	fd int
+	file *os.File
 }
 
 func (d *ScsiDevice) Type() string {
@@ -19,13 +18,13 @@ func (d *ScsiDevice) Type() string {
 }
 
 func OpenScsi(name string) (*ScsiDevice, error) {
-	fd, err := unix.Open(name, unix.O_RDWR, 0600)
+	f, err := os.Open(name)
 	if err != nil {
 		return nil, err
 	}
 
 	scsi := ScsiDevice{
-		fd: fd,
+		file: f,
 	}
 
 	i, err := scsi.Inquiry()
@@ -48,7 +47,7 @@ func OpenScsi(name string) (*ScsiDevice, error) {
 }
 
 func (d *ScsiDevice) Close() error {
-	return unix.Close(d.fd)
+	return d.file.Close()
 }
 
 const (
@@ -93,7 +92,7 @@ func (d *ScsiDevice) Capacity() (uint64, error) {
 
 	respBuf := make([]byte, 8)
 
-	if err := scsiSendCdb(d.fd, cdb[:], respBuf); err != nil {
+	if err := scsiSendCdb(d.file, cdb[:], respBuf); err != nil {
 		return 0, err
 	}
 
@@ -121,10 +120,10 @@ type ScsiInquiry struct {
 }
 
 func (d *ScsiDevice) Inquiry() (*ScsiInquiry, error) {
-	return scsiInquiry(d.fd)
+	return scsiInquiry(d.file)
 }
 
-func scsiInquiry(fd int) (*ScsiInquiry, error) {
+func scsiInquiry(file *os.File) (*ScsiInquiry, error) {
 	var resp ScsiInquiry
 
 	respBuf := make([]byte, 36) // 36 is the min response size
@@ -132,7 +131,7 @@ func scsiInquiry(fd int) (*ScsiInquiry, error) {
 	cdb := cdb6{_SCSI_INQUIRY}
 	binary.BigEndian.PutUint16(cdb[3:5], uint16(len(respBuf)))
 
-	if err := scsiSendCdb(fd, cdb[:], respBuf); err != nil {
+	if err := scsiSendCdb(file, cdb[:], respBuf); err != nil {
 		return &resp, err
 	}
 
@@ -143,16 +142,16 @@ func scsiInquiry(fd int) (*ScsiInquiry, error) {
 	return &resp, nil
 }
 
-func scsiInquiryVpd(fd int, page uint8, respBuf []byte) error {
+func scsiInquiryVpd(file *os.File, page uint8, respBuf []byte) error {
 	cdb := cdb6{_SCSI_INQUIRY, 1 /*enable VPD*/, page}
 	binary.BigEndian.PutUint16(cdb[3:5], uint16(len(respBuf)))
 
-	return scsiSendCdb(fd, cdb[:], respBuf)
+	return scsiSendCdb(file, cdb[:], respBuf)
 }
 
 func (d *ScsiDevice) SerialNumber() (string, error) {
 	buf := make([]byte, 256)
-	if err := scsiInquiryVpd(d.fd, 0x80, buf); err != nil {
+	if err := scsiInquiryVpd(d.file, 0x80, buf); err != nil {
 		return "", nil
 	}
 
@@ -231,47 +230,4 @@ type sgIoV4 struct {
 	spareOut        uint32 /* [o] */
 
 	_ uint32 // padding
-}
-
-func scsiSendCdb(fd int, cdb []byte, respBuf []byte) error {
-	senseBuf := make([]byte, 32)
-
-	/*
-		// TODO: make it work with sg_io_v4 data structure
-		hdr := sgIoV4{
-			guard:          'Q',
-			timeout:        _DEFAULT_TIMEOUT,
-			requestLen:     uint32(len(cdb)),
-			request:        uint64(uintptr(unsafe.Pointer(&cdb[0]))),
-			maxResponseLen: uint32(len(senseBuf)),
-			response:       uint64(uintptr(unsafe.Pointer(&senseBuf[0]))),
-			dinXferLen:     uint32(len(respBuf)),
-			dinXferp:       uint64(uintptr(unsafe.Pointer(&respBuf[0]))),
-		}
-	*/
-
-	hdr := sgIoHdr{
-		interfaceId:    'S',
-		dxferDirection: _SG_DXFER_FROM_DEV,
-		timeout:        _DEFAULT_TIMEOUT,
-		cmdLen:         uint8(len(cdb)),
-		mxSbLen:        uint8(len(senseBuf)),
-		dxferLen:       uint32(len(respBuf)),
-		dxferp:         uintptr(unsafe.Pointer(&respBuf[0])),
-		cmdp:           uintptr(unsafe.Pointer(&cdb[0])),
-		sbp:            uintptr(unsafe.Pointer(&senseBuf[0])),
-	}
-
-	if err := ioctl(uintptr(fd), _SG_IO, uintptr(unsafe.Pointer(&hdr))); err != nil {
-		return err
-	}
-
-	if hdr.info&_SG_INFO_OK_MASK != _SG_INFO_OK {
-		return sgioError{
-			deviceStatus: uint32(hdr.status),
-			hostStatus:   uint32(hdr.hostStatus),
-			driverStatus: uint32(hdr.driverStatus),
-		}
-	}
-	return nil
 }

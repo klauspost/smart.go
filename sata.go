@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"golang.org/x/sys/unix"
+	"os"
 )
 
 // https://people.freebsd.org/~imp/asiabsdcon2015/works/d2161r5-ATAATAPI_Command_Set_-_3.pdf
@@ -394,7 +394,7 @@ type AtaSmartSelfTestLog struct {
 }
 
 type SataDevice struct {
-	fd int
+	file *os.File
 }
 
 func (d *SataDevice) Type() string {
@@ -402,12 +402,12 @@ func (d *SataDevice) Type() string {
 }
 
 func OpenSata(name string) (*SataDevice, error) {
-	fd, err := unix.Open(name, unix.O_RDWR, 0600)
+	f, err := os.Open(name)
 	if err != nil {
 		return nil, err
 	}
 
-	i, err := scsiInquiry(fd)
+	i, err := scsiInquiry(f)
 	if err != nil {
 		return nil, err
 	}
@@ -417,13 +417,13 @@ func OpenSata(name string) (*SataDevice, error) {
 	}
 
 	dev := SataDevice{
-		fd,
+		file: f,
 	}
 	return &dev, nil
 }
 
 func (d *SataDevice) Close() error {
-	return unix.Close(d.fd)
+	return d.file.Close()
 }
 
 func (d *SataDevice) Identify() (*AtaIdentifyDevice, error) {
@@ -436,7 +436,7 @@ func (d *SataDevice) Identify() (*AtaIdentifyDevice, error) {
 	cdb[2] = 0x0e                  // BYT_BLOK = 1, T_LENGTH = 2, T_DIR = 1
 	cdb[14] = _ATA_IDENTIFY_DEVICE // command
 
-	if err := scsiSendCdb(d.fd, cdb[:], respBuf); err != nil {
+	if err := scsiSendCdb(d.file, cdb[:], respBuf); err != nil {
 		return &resp, fmt.Errorf("sendCDB ATA IDENTIFY: %v", err)
 	}
 
@@ -460,7 +460,7 @@ func (d *SataDevice) readSMARTLog(logPage uint8) ([]byte, error) {
 	cdb[12] = 0xc2           // low lba_high
 	cdb[14] = _ATA_SMART     // command
 
-	if err := scsiSendCdb(d.fd, cdb[:], respBuf); err != nil {
+	if err := scsiSendCdb(d.file, cdb[:], respBuf); err != nil {
 		return nil, fmt.Errorf("scsiSendCdb SMART READ LOG: %v", err)
 	}
 
@@ -478,7 +478,7 @@ func (d *SataDevice) ReadSMARTData() (*AtaSmartPage, error) {
 
 	respBuf := make([]byte, 512)
 
-	if err := scsiSendCdb(d.fd, cdb[:], respBuf); err != nil {
+	if err := scsiSendCdb(d.file, cdb[:], respBuf); err != nil {
 		return nil, fmt.Errorf("scsiSendCdb SMART READ DATA: %v", err)
 	}
 
